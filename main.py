@@ -31,6 +31,7 @@ if 'db' not in st.session_state:
 # --- 3. 핵심 분석 함수 ---
 def get_analysis(ticker):
     try:
+        # 데이터 수집 (5일치 데이터로 안정성 확보)
         data = yf.download(ticker, period="5d", interval="1h", progress=False)
         if data.empty or len(data) < 2: return None
         current_price = float(data['Close'].iloc[-1])
@@ -43,10 +44,12 @@ def get_analysis(ticker):
 # --- 4. 자동 매매 로직 ---
 def run_trading_engine():
     db = st.session_state.db
+    # 분석 종목 리스트
     tickers = ["PLTR", "NVDA", "TSLA", "AAPL", "MSFT", "GOOGL", "BTC-USD", "ETH-USD", "DOGE-USD"]
     
+    # UI 피드백 (크론잡 실행 시에는 생략되거나 로그로만 기록됨)
     with st.status("🔍 AI 엔진이 시장을 정밀 스캔 중...", expanded=True) as status:
-        # 1. 매도 감시
+        # 1. 매도 감시 (익절 5%, 손절 -3%)
         for item in db['portfolio'][:]:
             res = get_analysis(item['ticker'])
             if res:
@@ -56,10 +59,10 @@ def run_trading_engine():
                     db['logs'].append(f"[{get_now().strftime('%H:%M:%S')}] {item['ticker']} 매도 (수익률: {profit*100:.2f}%)")
                     db['portfolio'].remove(item)
 
-        # 2. 매수 탐색 (조건: 2% 이상 급등 시)
+        # 2. 매수 탐색 (2% 이상 상승 시 매수)
         for t in tickers:
             if any(p['ticker'] == t for p in db['portfolio']): continue
-            st.write(f"📊 {t} 데이터 분석 중...")
+            st.write(f"📊 {t} 분석 중...")
             res = get_analysis(t)
             
             if res and res['c'] >= 0.02: 
@@ -74,10 +77,17 @@ def run_trading_engine():
     save_db(db)
     st.session_state.db = db
 
-# --- 5. UI 구성 ---
+# --- 5. UI 구성 및 자동화 로직 ---
 st.set_page_config(page_title="AI 트레이딩 센터", layout="wide")
+
+# [핵심] 크론잡 자동 실행 체크
+if st.query_params.get("auto") == "true":
+    run_trading_engine()
+    st.success("🤖 크론잡 자동 스캔 완료")
+
 st.title("🤖 AI 무한 트레이딩 센터")
 
+# 버튼 레이아웃
 col1, col2 = st.columns(2)
 with col1:
     if st.button("🚀 AI 자동매매 엔진 가동", use_container_width=True):
@@ -94,12 +104,13 @@ with col2:
 
 st.divider()
 
+# 결과 표시 탭
 tab1, tab2 = st.tabs(["📜 거래 로그", "💼 포트폴리오"])
 
 with tab1:
     st.subheader(f"💰 현재 잔고: {st.session_state.db['balance']:,.0f}원")
     if not st.session_state.db['logs']:
-        st.info("거래 기록이 없습니다. '엔진 가동'을 눌러주세요.")
+        st.info("거래 기록이 없습니다. 본장(22:30) 시작 후 엔진을 가동해 보세요.")
     else:
         for log in reversed(st.session_state.db['logs']):
             st.write(log)
