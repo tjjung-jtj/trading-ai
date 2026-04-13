@@ -1,2 +1,5 @@
-fastapi
-uvicorn
+streamlit
+yfinance
+pandas
+numpy
+plotly
