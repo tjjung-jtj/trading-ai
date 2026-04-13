@@ -9,7 +9,7 @@ import os
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
-# --- 2. 데이터 저장/불러오기 (각 100만 원 세팅) ---
+# --- 2. 데이터 저장/불러오기 ---
 DB_FILE = "trading_db.json"
 def load_db():
     if os.path.exists(DB_FILE):
@@ -49,7 +49,7 @@ def get_analysis(ticker):
 def run_trading_engine():
     db = st.session_state.db
     
-    # [종목 리스트] 테더, 솔라나 제외 완료
+    # 국장, 미장, 코인(비트, 이더, 도지, 리플) 리스트
     kr_tickers = ["005930.KS", "000660.KS", "035720.KS"] 
     us_tickers = ["NVDA", "TSLA", "AAPL", "PLTR", "MSFT"]
     coin_tickers = ["BTC-USD", "ETH-USD", "DOGE-USD", "XRP-USD"] 
@@ -78,6 +78,56 @@ def run_trading_engine():
                 if any(p['ticker'] == t for p in db['portfolio']): continue
                 res = get_analysis(t)
                 if res and res['c'] >= 0.025: 
-                    qty = (db[b_key] * 0.2) // res['p'] 
+                    # 한 종목당 해당 자산 잔고의 20%를 사용하여 매수
+                    buy_amount = db[b_key] * 0.2
+                    qty = buy_amount // res['p'] 
                     if qty > 0:
-                        db[b_key] -=
+                        db[b_key] -= res['p'] * qty  # <--- 이 부분 오류 수정 완료!
+                        db['portfolio'].append({"ticker": t, "buy_p": res['p'], "qty": qty, "type": p_type})
+                        db['logs'].append(f"[{get_now().strftime('%H:%M:%S')}] ✅ {t} 매수 (상승률: {res['c']*100:.2f}%)")
+                        trade_happened = True
+        
+        if not trade_happened:
+            db['logs'].append(f"[{get_now().strftime('%H:%M:%S')}] 🤖 정기 스캔 완료 (이상 없음)")
+        
+        if len(db['logs']) > 50: db['logs'] = db['logs'][-50:]
+        status.update(label="✅ 스캔 완료", state="complete", expanded=False)
+    
+    save_db(db)
+    st.session_state.db = db
+
+# --- 5. UI 구성 ---
+st.set_page_config(page_title="AI 종합 관리 센터", layout="wide")
+
+if st.query_params.get("auto") == "true":
+    run_trading_engine()
+
+st.title("🤖 AI 종합 자산 관리 (100-100-100)")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("🇰🇷 국장 잔고", f"{st.session_state.db['balance_kr']:,.0f}원")
+c2.metric("🇺🇸 미장 잔고", f"{st.session_state.db['balance_us']:,.0f}원")
+c3.metric("🪙 코인 잔고", f"{st.session_state.db['balance_coin']:,.0f}원")
+
+st.divider()
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🚀 즉시 스캔 가동", use_container_width=True):
+        run_trading_engine()
+        st.rerun()
+with col2:
+    if st.button("🔄 전 자산 초기화", use_container_width=True):
+        if os.path.exists(DB_FILE): os.remove(DB_FILE)
+        st.session_state.db = load_db()
+        save_db(st.session_state.db)
+        st.rerun()
+
+tab1, tab2 = st.tabs(["📜 거래 로그", "💼 포트폴리오"])
+with tab1:
+    for log in reversed(st.session_state.db['logs']): st.write(log)
+with tab2:
+    if not st.session_state.db['portfolio']: st.info("보유 종목 없음")
+    else:
+        for item in st.session_state.db['portfolio']:
+            st.write(f"**[{item['type']}] {item['ticker']}** | {int(item['qty'])}주 | 매수가: {item['buy_p']:,.2f}")
