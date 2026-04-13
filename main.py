@@ -13,11 +13,16 @@ def get_now():
 DB_FILE = "trading_db.json"
 def load_db():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f: return json.load(f)
+        try:
+            with open(DB_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
     return {"balance": 10000000, "portfolio": [], "logs": []}
 
 def save_db(data):
-    with open(DB_FILE, "w") as f: json.dump(data, f)
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f)
 
 # 세션 초기화
 if 'db' not in st.session_state:
@@ -26,63 +31,96 @@ if 'db' not in st.session_state:
 # --- 3. 핵심 분석 함수 ---
 def get_analysis(ticker):
     try:
-        data = yf.download(ticker, period="2d", interval="1h", progress=False)
-        if data.empty: return None
-        current_price = data['Close'].iloc[-1]
-        prev_price = data['Close'].iloc[-2]
+        # 데이터 수집 (안정성을 위해 5일치 데이터를 가져옴)
+        data = yf.download(ticker, period="5d", interval="1h", progress=False)
+        if data.empty or len(data) < 2: return None
+        current_price = float(data['Close'].iloc[-1])
+        prev_price = float(data['Close'].iloc[-2])
         change = (current_price - prev_price) / prev_price
-        return {"p": float(current_price), "c": float(change)}
-    except: return None
+        return {"p": current_price, "c": change}
+    except:
+        return None
 
 # --- 4. 자동 매매 로직 ---
 def run_trading_engine():
     db = st.session_state.db
-    tickers = ["PLTR", "NVDA", "TSLA", "AAPL", "BTC-USD", "ETH-USD"]
+    # 분석 대상 종목 (주식 + 코인)
+    tickers = ["PLTR", "NVDA", "TSLA", "AAPL", "MSFT", "GOOGL", "BTC-USD", "ETH-USD", "DOGE-USD"]
     
-    # 실시간 진행 상황을 보여주기 위한 Streamlit 전용 위젯
     with st.status("🔍 AI 엔진이 시장을 정밀 스캔 중...", expanded=True) as status:
-        # 1. 익절/손절 감시
+        # 1. 익절/손절 감시 (기존 유지)
         for item in db['portfolio'][:]:
             res = get_analysis(item['ticker'])
             if res:
                 profit = (res['p'] - item['buy_p']) / item['buy_p']
                 if profit >= 0.05 or profit <= -0.03:
                     db['balance'] += res['p'] * item['qty']
-                    db['logs'].append(f"[{get_now().strftime('%m/%d %H:%M')}] {item['ticker']} 매도 (수익률: {profit*100:.2f}%)")
+                    db['logs'].append(f"[{get_now().strftime('%H:%M:%S')}] {item['ticker']} 매도 (수익률: {profit*100:.2f}%)")
                     db['portfolio'].remove(item)
 
-        # 2. 신규 매수 탐색
+        # 2. 신규 매수 탐색 (조건: 2% 이상 급등 시)
         for t in tickers:
             if any(p['ticker'] == t for p in db['portfolio']): continue
             st.write(f"📊 {t} 데이터 분석 중...")
             res = get_analysis(t)
-            if res and res['c'] > 0.02: # 2% 이상 상승 시 매수
+            
+            # 매수 조건: 1시간 전 대비 2% 이상 상승 (사용자 요청 유지)
+            if res and res['c'] >= 0.02: 
                 qty = (db['balance'] * 0.1) // res['p']
                 if qty > 0:
                     db['balance'] -= res['p'] * qty
                     db['portfolio'].append({"ticker": t, "buy_p": res['p'], "qty": qty})
-                    db['logs'].append(f"[{get_now().strftime('%m/%d %H:%M')}] {t} {qty}주 매수 완료")
+                    db['logs'].append(f"[{get_now().strftime('%H:%M:%S')}] {t} {int(qty)}주 매수 완료 (상승률: {res['c']*100:.2f}%)")
         
         status.update(label="✅ 스캔 및 거래 완료!", state="complete", expanded=False)
     
     save_db(db)
+    st.session_state.db = db
 
 # --- 5. UI 구성 ---
+st.set_page_config(page_title="AI 트레이딩 센터", layout="wide")
 st.title("🤖 AI 무한 트레이딩 센터")
 
-if st.button("🚀 AI 자동매매 엔진 가동"):
-    run_trading_engine()
-    st.rerun()
+# 버튼 레이아웃 (상단 배치)
+col1, col2 = st.columns([1, 1])
+with col1:
+    if st.button("🚀 AI 자동매매 엔진 가동", use_container_width=True):
+        run_trading_engine()
+        st.rerun()
+with col2:
+    if st.button("🔄 데이터 초기화 (Reset)", use_container_width=True):
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+        st.session_state.db = {"balance": 10000000, "portfolio": [], "logs": []}
+        save_db(st.session_state.db)
+        st.success("데이터가 초기화되었습니다.")
+        st.rerun()
 
+st.divider()
+
+# 결과 표시 탭
 tab1, tab2 = st.tabs(["📜 거래 로그", "💼 포트폴리오"])
 
 with tab1:
-    st.write(f"현재 잔고: {st.session_state.db['balance']:,.0f}원")
-    for log in reversed(st.session_state.db['logs']):
-        st.write(log)
+    st.subheader(f"💰 현재 잔고: {st.session_state.db['balance']:,.0f}원")
+    if not st.session_state.db['logs']:
+        st.info("아직 거래 기록이 없습니다. '엔진 가동'을 눌러 시장을 스캔해 보세요.")
+    else:
+        for log in reversed(st.session_state.db['logs']):
+            st.write(log)
 
 with tab2:
-    for item in st.session_state.db['portfolio']:
-        res = get_analysis(item['ticker'])
-        p_val = (res['p'] - item['buy_p']) / item['buy_p'] * 100 if res else 0
-        st.metric(item['ticker'], f"{item['buy_p']:,.2f}", f"{p_val:.2f}%")
+    if not st.session_state.db['portfolio']:
+        st.info("보유 중인 종목이 없습니다.")
+    else:
+        # 포트폴리오를 카드 형태로 표시
+        cols = st.columns(3)
+        for idx, item in enumerate(st.session_state.db['portfolio']):
+            res = get_analysis(item['ticker'])
+            with cols[idx % 3]:
+                if res:
+                    p_val = (res['p'] - item['buy_p']) / item['buy_p'] * 100
+                    st.metric(label=item['ticker'], value=f"{res['p']:,.2f}", delta=f"{p_val:.2f}%")
+                    st.caption(f"매수가: {item['buy_p']:,.2f} | 수량: {int(item['qty'])}")
+                else:
+                    st.
