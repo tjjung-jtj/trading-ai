@@ -3,13 +3,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
 
 # 1. 앱 기본 설정
 st.set_page_config(page_title="AI Trading Simulator", layout="wide")
 
 st.title("🤖 AI 통합 자산 시뮬레이터 (Pro)")
-st.caption(f"최종 업데이트: 2026-04-13 | 국내/미국 주식 & 빗썸 코인 실시간 연동")
+st.caption("최종 업데이트: 2026-04-13 | 국내/미국 주식 & 빗썸 코인 실시간 연동")
 
 # 2. 투자금 설정
 with st.sidebar:
@@ -27,6 +26,7 @@ def run_simulation(ticker, budget, name):
     if df.empty:
         return None, budget, []
 
+    # 지표 계산
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
     
@@ -34,13 +34,17 @@ def run_simulation(ticker, budget, name):
     shares = 0
     history = []
 
+    # 데이터 분석 루프
     for i in range(20, len(df)):
         current_price = df['Close'].iloc[i]
         volume = df['Volume'].iloc[i]
-        avg_vol = df['Vol_Avg'].iloc[i]
         
-        # [수정 완료] 단일 값 비교 로직
-        if volume > (avg_vol * 2.5) and current_price > df['MA20'].iloc[i] and cash > 0:
+        # [중요] 특정 시점(i)의 평균 거래량 값을 단일 값으로 미리 추출
+        current_avg_vol = df['Vol_Avg'].iloc[i]
+        current_ma20 = df['MA20'].iloc[i]
+        
+        # [에러 해결] 단일 값(Scalar)끼리만 비교하도록 수정
+        if volume > (current_avg_vol * 2.5) and current_price > current_ma20 and cash > 0:
             shares = cash / current_price
             cash = 0
             history.append((df.index[i], 'BUY', current_price))
@@ -77,11 +81,11 @@ for a in assets:
             st.metric("최종 평가자산", f"{final_val:,.0f}원", f"{profit:.2f}%")
             
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='현재가'))
+            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='가격'))
             fig.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error(f"{a['name']} 데이터 오류")
+            st.error(f"{a['name']} 데이터 불러오기 실패")
 
 # 5. 하단 리포트
 st.divider()
