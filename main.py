@@ -4,81 +4,79 @@ import pandas as pd
 import time
 
 # 1. 앱 설정
-st.set_page_config(page_title="AI Live Scanner", layout="wide")
+st.set_page_config(page_title="News-Based AI Trader", layout="wide")
 
 if 'balance_coin' not in st.session_state:
     st.session_state.balance_coin, st.session_state.balance_us, st.session_state.balance_kr = 1000000, 500000, 500000
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = []
 
-st.title("🔥 AI 공격형 스캐너 (실시간 생중계 모드)")
+st.title("🗞️ 뉴스 & 이슈 대응 AI 자동매매")
+st.caption("전쟁, AI, 빅테크 등 실시간 수급이 몰리는 테마 종목을 분석합니다.")
 
-# 2. 분석 함수
-def get_analysis(ticker):
+# 2. 테마별 종목 세팅 (전쟁, AI, 코인)
+THEMES = {
+    'AI_TECH': ['NVDA', 'PLTR', 'MSFT', '000660.KS', '035420.KS'],
+    'WAR_ENERGY': ['LMT', 'XOM', '012450.KS', '001060.KS'], # 방산(한화에어로, 중외), 에너지
+    'COIN_SAFE': ['BTC-KRW', 'ETH-KRW', 'SOL-KRW', 'XRP-KRW']
+}
+
+# 3. 뉴스 민감도 분석 (거래량 + 변동성 결합)
+def get_theme_analysis(ticker):
     try:
-        df = yf.download(ticker, period="1mo", interval="1d", progress=False)
-        if df.empty or len(df) < 5: return None
+        df = yf.download(ticker, period="5d", interval="1d", progress=False)
+        if df.empty or len(df) < 2: return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        
+            
         curr_p = float(df['Close'].iloc[-1])
-        high_p = float(df['High'].max())
-        drop_rate = (curr_p - high_p) / high_p * 100
-        vol_ratio = float(df['Volume'].iloc[-1]) / float(df['Volume'].iloc[:-1].mean())
+        prev_p = float(df['Close'].iloc[-2])
+        # 뉴스 민감도: 평소보다 거래량이 1.3배 이상이면서 가격 변동이 2% 이상인 경우
+        vol_ratio = df['Volume'].iloc[-1] / df['Volume'].iloc[:-1].mean()
+        price_change = abs((curr_p - prev_p) / prev_p * 100)
         
-        return {'p': curr_p, 'drop': drop_rate, 'vol': vol_ratio}
+        return {'p': curr_p, 'vol': vol_ratio, 'change': price_change, 'raw': df}
     except:
         return None
 
-# 3. 메인 로직
-tab1, tab2 = st.tabs(["📺 실시간 스캔 방송", "💼 현재 포트폴리오"])
+# 4. 메인 화면 로직
+tab1, tab2 = st.tabs(["📡 실시간 테마 스캔", "💼 통합 포트폴리오"])
 
 with tab1:
-    if st.button("🎯 시장 스캔 및 자동매매 시작"):
-        targets = {
-            'coin': ['SOL-KRW', 'DOGE-KRW', 'PEPE-KRW', 'SHIB-KRW', 'XRP-KRW'],
-            'us': ['SOXL', 'TQQQ', 'MSTR', 'COIN', 'TSLA', 'NVDA'],
-            'kr': ['086520.KQ', '277810.KQ', '465320.KS', '066570.KS', '003670.KS']
-        }
-        
-        st.subheader("📡 AI 실시간 분석 로그")
-        log_container = st.container()
-        
-        for cat, tickers in targets.items():
+    if st.button("🔥 테마별 뉴스 수급 분석 시작"):
+        st.subheader("🕵️ AI가 현재 이슈 종목을 찾는 중...")
+        for theme_name, tickers in THEMES.items():
+            st.write(f"--- **{theme_name} 관련주 분석** ---")
             for t in tickers:
-                with log_container:
-                    # 이미 보유 중인 종목은 패스
-                    if any(s['ticker'] == t for s in st.session_state.portfolio):
-                        st.write(f"ℹ️ {t}: 이미 보유 중입니다.")
-                        continue
+                if any(s['ticker'] == t for s in st.session_state.portfolio): continue
+                
+                res = get_theme_analysis(t)
+                if res:
+                    # 조건: 거래량이 1.3배 이상 (이슈 발생) & 변동성이 1.5% 이상 (수급 집중)
+                    is_hot = res['vol'] > 1.3 and res['change'] > 1.5
+                    status = "✅ 수급 포착 (뉴스 의심)" if is_hot else "💤 조용함"
+                    st.write(f"🔍 {t}: 거래량 `{res['vol']:.2f}배` | 변동 `{res['change']:.1f}%` -> {status}")
                     
-                    res = get_analysis(t)
-                    if res:
-                        # 분석 수치 생중계
-                        status = "✅ 조건 부합!" if (res['drop'] < -15 and res['vol'] > 1.5) else "❌ 조건 미달"
-                        st.write(f"🔍 **{t}** 분석: 낙폭 `{res['drop']:.1f}%` | 거래량 `{res['vol']:.2f}배` -> {status}")
+                    if is_hot:
+                        # 자산 배분 로직
+                        cat = 'coin' if 'KRW' in t else ('us' if t[0].isalpha() else 'kr')
+                        buy_limit = 500000 if cat == 'coin' else 250000
                         
-                        # 실제 매수 실행
-                        if res['drop'] < -15 and res['vol'] > 1.5:
-                            buy_limit = 500000 if cat == 'coin' else 250000
-                            balance = getattr(st.session_state, f'balance_{cat}')
-                            
-                            if balance >= buy_limit:
-                                st.session_state.portfolio.append({
-                                    'ticker': t, 'buy_p': res['p'], 'qty': buy_limit/res['p'], 'cat': cat
-                                })
-                                setattr(st.session_state, f'balance_{cat}', balance - buy_limit)
-                                st.success(f"🚀 {t} 매수 체결!")
-                    time.sleep(0.1) # 생중계 느낌을 위해 살짝 딜레이
-        st.success("스캔 완료!")
+                        st.session_state.portfolio.append({
+                            'ticker': t, 'buy_p': res['p'], 'qty': buy_limit/res['p'], 'cat': cat, 'theme': theme_name
+                        })
+                        st.success(f"🚀 {t} ({theme_name}) 매수 완료!")
+                time.sleep(0.1)
+        st.rerun()
 
 with tab2:
     if not st.session_state.portfolio:
-        st.write("보유 종목이 없습니다.")
+        st.info("보유 종목이 없습니다.")
     else:
+        total_eval = 0
         for s in st.session_state.portfolio:
-            st.write(f"**[{s['cat'].upper()}] {s['ticker']}** | 매수가: {s['buy_p']:,.2f}")
-
-if st.sidebar.button("🔄 원금 리셋"):
-    st.session_state.clear()
-    st.rerun()
+            res = get_theme_analysis(s['ticker'])
+            if res:
+                profit = (res['p'] - s['buy_p']) / s['buy_p'] * 100
+                total_eval += (res['p'] * s['qty'])
+                st.write(f"**[{s['theme']}] {s['ticker']}** | 수익률: `{profit:+.2f}%` | 현재가: {res['p']:,.0f}")
