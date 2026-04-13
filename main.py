@@ -4,34 +4,32 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# 1. 앱 기본 설정
+# 1. 앱 설정
 st.set_page_config(page_title="AI Trading Simulator", layout="wide")
-
-st.title("🤖 AI 통합 자산 시뮬레이터 (Final Fix)")
-st.caption("최종 업데이트: 2026-04-13 | 데이터 형식 오류 완벽 수정 버전")
+st.title("🤖 AI 통합 시뮬레이터 (삼성전자 오류 해결판)")
 
 # 2. 투자금 설정
 with st.sidebar:
     st.header("💰 가상 투자 설정")
     budget_stock = 100000000
     budget_coin = 100000000
-    st.divider()
-    st.subheader("⚙️ AI 매매 로직")
-    st.write("- **매수**: 거래량 2.5배 폭증 + 20일 이평선 돌파")
-    st.write("- **매도**: 5% 익절 또는 3% 손절")
 
-# 3. AI 시뮬레이션 엔진 함수
+# 3. 핵심 엔진
 def run_simulation(ticker, budget, name):
-    # 데이터를 가져오고 멀티인덱스 가능성 제거
-    df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-    if df.empty:
+    # 데이터 수집 시 멀티인덱스 자동 방지 처리
+    df = yf.download(ticker, period="6mo", interval="1d", progress=False, auto_adjust=True)
+    
+    if df.empty or len(df) < 20:
         return None, budget, []
     
-    # 데이터 구조 단순화 (Multi-index 방지)
+    # 데이터 구조 평면화 (삼성전자 특유의 겹침 현상 해결)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # 지표 계산
+    # 데이터 정리 (NaN 값 제거)
+    df = df.dropna(subset=['Close', 'Volume'])
+
+    # 지표 생성
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
     
@@ -42,61 +40,54 @@ def run_simulation(ticker, budget, name):
     # 데이터 분석 루프
     for i in range(20, len(df)):
         try:
-            # 값을 추출할 때 확실하게 숫자(float)로 변환
-            current_price = float(df['Close'].iloc[i])
-            volume = float(df['Volume'].iloc[i])
-            current_avg_vol = float(df['Vol_Avg'].iloc[i])
-            current_ma20 = float(df['MA20'].iloc[i])
+            # .values[0] 혹은 float()를 사용하여 완벽한 단일 값 추출
+            curr_p = float(df['Close'].iloc[i])
+            curr_v = float(df['Volume'].iloc[i])
+            avg_v = float(df['Vol_Avg'].iloc[i])
+            ma20 = float(df['MA20'].iloc[i])
             
-            # AI 매수 조건 (모든 값이 숫자이므로 에러 발생 불가)
-            if volume > (current_avg_vol * 2.5) and current_price > current_ma20 and cash > 0:
-                shares = cash / current_price
+            # AI 매수/매도 로직
+            if curr_v > (avg_v * 2.5) and curr_p > ma20 and cash > 0:
+                shares = cash / curr_p
                 cash = 0
-                history.append((df.index[i], 'BUY', current_price))
-                
+                history.append((df.index[i], 'BUY', curr_p))
             elif shares > 0:
-                buy_price = history[-1][2]
-                profit_rate = (current_price - buy_price) / buy_price
-                if profit_rate > 0.05 or profit_rate < -0.03:
-                    cash = shares * current_price
+                buy_p = history[-1][2]
+                profit = (curr_p - buy_p) / buy_p
+                if profit > 0.05 or profit < -0.03:
+                    cash = shares * curr_p
                     shares = 0
-                    history.append((df.index[i], 'SELL', current_price))
+                    history.append((df.index[i], 'SELL', curr_p))
         except:
             continue
 
     final_val = cash + (shares * float(df['Close'].iloc[-1]))
     return df, final_val, history
 
-# 4. 메인 화면 구성
-col1, col2, col3 = st.columns(3)
-
+# 4. 화면 출력
+cols = st.columns(3)
 assets = [
-    {"ticker": "005930.KS", "name": "🇰🇷 삼성전자", "budget": budget_stock, "col": col1},
-    {"ticker": "NVDA", "name": "🇺🇸 엔비디아", "budget": budget_stock, "col": col2},
-    {"ticker": "BTC-KRW", "name": "🪙 비트코인", "budget": budget_coin, "col": col3}
+    {"t": "005930.KS", "n": "🇰🇷 삼성전자", "b": budget_stock, "c": cols[0]},
+    {"t": "NVDA", "n": "🇺🇸 엔비디아", "b": budget_stock, "c": cols[1]},
+    {"t": "BTC-KRW", "n": "🪙 비트코인", "b": budget_coin, "c": cols[2]}
 ]
 
-total_final_assets = 0
-
+total_val = 0
 for a in assets:
-    with a['col']:
-        df, final_val, history = run_simulation(a['ticker'], a['budget'], a['name'])
+    with a['c']:
+        df, final, hist = run_simulation(a['t'], a['b'], a['n'])
         if df is not None:
-            profit = ((final_val / a['budget']) - 1) * 100
-            total_final_assets += final_val
-            st.subheader(a['name'])
-            st.metric("최종 평가자산", f"{final_val:,.0f}원", f"{profit:.2f}%")
+            total_val += final
+            profit_pct = ((final / a['b']) - 1) * 100
+            st.metric(a['n'], f"{final:,.0f}원", f"{profit_pct:.2f}%")
             
+            # 그래프 시각화 (더 세련된 방식)
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='가격'))
-            fig.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250)
+            fig.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=200)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error(f"{a['name']} 데이터 오류")
+            st.warning(f"{a['n']} 데이터를 현재 불러올 수 없습니다. 잠시 후 새로고침 해주세요.")
 
-# 5. 하단 리포트
 st.divider()
-total_initial = (budget_stock * 2) + budget_coin
-total_profit_rate = ((total_final_assets / total_initial) - 1) * 100
-st.header(f"📈 총 수익률: {total_profit_rate:.2f}%")
-st.write(f"최종 합산 자산: **{total_final_assets:,.0f}원**")
+st.header(f"💰 전체 합산 자산: {total_val:,.0f}원")
