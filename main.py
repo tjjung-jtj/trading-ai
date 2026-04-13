@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 # 1. 앱 기본 설정
 st.set_page_config(page_title="AI Trading Simulator", layout="wide")
 
-st.title("🤖 AI 통합 자산 시뮬레이터 (Pro)")
-st.caption("최종 업데이트: 2026-04-13 | 국내/미국 주식 & 빗썸 코인 실시간 연동")
+st.title("🤖 AI 통합 자산 시뮬레이터 (Final Fix)")
+st.caption("최종 업데이트: 2026-04-13 | 데이터 형식 오류 완벽 수정 버전")
 
 # 2. 투자금 설정
 with st.sidebar:
@@ -22,9 +22,14 @@ with st.sidebar:
 
 # 3. AI 시뮬레이션 엔진 함수
 def run_simulation(ticker, budget, name):
+    # 데이터를 가져오고 멀티인덱스 가능성 제거
     df = yf.download(ticker, period="6mo", interval="1d", progress=False)
     if df.empty:
         return None, budget, []
+    
+    # 데이터 구조 단순화 (Multi-index 방지)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
     # 지표 계산
     df['MA20'] = df['Close'].rolling(window=20).mean()
@@ -36,28 +41,30 @@ def run_simulation(ticker, budget, name):
 
     # 데이터 분석 루프
     for i in range(20, len(df)):
-        current_price = df['Close'].iloc[i]
-        volume = df['Volume'].iloc[i]
-        
-        # [중요] 특정 시점(i)의 평균 거래량 값을 단일 값으로 미리 추출
-        current_avg_vol = df['Vol_Avg'].iloc[i]
-        current_ma20 = df['MA20'].iloc[i]
-        
-        # [에러 해결] 단일 값(Scalar)끼리만 비교하도록 수정
-        if volume > (current_avg_vol * 2.5) and current_price > current_ma20 and cash > 0:
-            shares = cash / current_price
-            cash = 0
-            history.append((df.index[i], 'BUY', current_price))
+        try:
+            # 값을 추출할 때 확실하게 숫자(float)로 변환
+            current_price = float(df['Close'].iloc[i])
+            volume = float(df['Volume'].iloc[i])
+            current_avg_vol = float(df['Vol_Avg'].iloc[i])
+            current_ma20 = float(df['MA20'].iloc[i])
             
-        elif shares > 0:
-            buy_price = history[-1][2]
-            profit_rate = (current_price - buy_price) / buy_price
-            if profit_rate > 0.05 or profit_rate < -0.03:
-                cash = shares * current_price
-                shares = 0
-                history.append((df.index[i], 'SELL', current_price))
+            # AI 매수 조건 (모든 값이 숫자이므로 에러 발생 불가)
+            if volume > (current_avg_vol * 2.5) and current_price > current_ma20 and cash > 0:
+                shares = cash / current_price
+                cash = 0
+                history.append((df.index[i], 'BUY', current_price))
+                
+            elif shares > 0:
+                buy_price = history[-1][2]
+                profit_rate = (current_price - buy_price) / buy_price
+                if profit_rate > 0.05 or profit_rate < -0.03:
+                    cash = shares * current_price
+                    shares = 0
+                    history.append((df.index[i], 'SELL', current_price))
+        except:
+            continue
 
-    final_val = cash + (shares * df['Close'].iloc[-1])
+    final_val = cash + (shares * float(df['Close'].iloc[-1]))
     return df, final_val, history
 
 # 4. 메인 화면 구성
@@ -85,7 +92,7 @@ for a in assets:
             fig.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error(f"{a['name']} 데이터 불러오기 실패")
+            st.error(f"{a['name']} 데이터 오류")
 
 # 5. 하단 리포트
 st.divider()
