@@ -5,13 +5,14 @@ import json
 import os
 
 # --- 0. 버전 설정 ---
-VERSION = "1.6.2"
+VERSION = "1.7"
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
 DB_FILE = "trading_db.json"
 
+# 데이터 로드/저장 함수
 def load_db():
     if os.path.exists(DB_FILE):
         try:
@@ -24,43 +25,58 @@ def save_db(data):
     with open(DB_FILE, "w", encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
-# --- 1. [최후의 수단] st.context 사용 ---
-# query_params가 안 먹힐 때 직접 주소창의 인자를 낚아챕니다.
-is_auto = False
-try:
-    # 1순위: 최신 st.context 방식
-    if "auto" in st.context.query_params:
-        if st.context.query_params["auto"] == "true":
-            is_auto = True
-    # 2순위: 구형 방식 보조
-    elif st.query_params.get("auto") == "true":
-        is_auto = True
-except:
-    # 3순위: 전통적 방식
-    if st.query_params.to_dict().get("auto") == "true":
-        is_auto = True
-
-if is_auto:
+# --- 1. 엔진 가동 함수 ---
+def run_engine(reason="자동"):
     db = load_db()
     now_str = get_now().strftime('%Y-%m-%d %H:%M:%S')
     
-    # [핵심 엔진 실행]
-    # 여기에 실제 yfinance 매매 로직이 포함됩니다.
+    # [시세 스캔]
+    tickers = ["BTC-USD", "NVDA", "005930.KS"]
+    for t in tickers:
+        try: yf.download(t, period="2d", interval="1h", progress=False)
+        except: pass
     
     db["scan_count"] += 1
     db["last_scan"] = now_str
-    db['logs'].append(f"[{now_str}] 🤖 v{VERSION} 자동 스캔 성공")
+    db['logs'].append(f"[{now_str}] 🤖 {reason} 스캔 완료 (v{VERSION})")
     save_db(db)
-    
-    # 크론잡에게 텍스트로만 응답 (HTML 방지)
-    st.write(f"V{VERSION}_SUCCESS")
-    st.stop()
+    return db
 
-# --- 2. 메인 UI (여기서부터는 기존과 동일) ---
-st.set_page_config(page_title="AI 자산관리 v1.6.2", layout="wide")
+# --- 2. 크론잡 체크 (UI를 방해하지 않음) ---
+# 주소창에 ?auto=true가 있으면 조용히 엔진만 돌리고 넘어갑니다.
+if st.query_params.get("auto") == "true":
+    run_engine("자동(크론)")
+    # 여기서 st.stop()을 하지 않아야 화면이 정상적으로 뜹니다.
+
+# --- 3. 메인 UI 구성 ---
+st.set_page_config(page_title=f"AI 종합관리 v{VERSION}", layout="wide")
 db = load_db()
 
 st.title("🤖 AI 자산 관리 시스템")
-st.info(f"📊 **엔진 상태 (v{VERSION})** | 마지막 스캔: {db.get('last_scan')} | **누적 스캔: {db.get('scan_count')}회**")
 
-# ... (이하 버튼 및 잔고 코드 생략) ...
+# 파란색 상태바
+st.info(f"📊 **엔진 상태 (v{VERSION})** | 마지막 스캔: {db.get('last_scan')} | **누적 스캔: {db.get('scan_count', 0)}회**")
+
+# 잔고 표시
+c1, c2, c3 = st.columns(3)
+c1.metric("🇰🇷 국장", f"{db.get('balance_kr', 0):,.0f}원")
+c2.metric("🇺🇸 미장", f"{db.get('balance_us', 0):,.0f}원")
+c3.metric("🪙 코인", f"{db.get('balance_coin', 0):,.0f}원")
+
+st.divider()
+
+# 버튼들
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🚀 즉시 스캔 가동", use_container_width=True):
+        db = run_engine("수동")
+        st.rerun()
+with col2:
+    if st.button("🔄 데이터 초기화", use_container_width=True):
+        if os.path.exists(DB_FILE): os.remove(DB_FILE)
+        st.rerun()
+
+# 로그 표시
+st.subheader("📜 거래 로그")
+for log in reversed(db.get('logs', [])):
+    st.write(log)
