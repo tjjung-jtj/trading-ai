@@ -6,90 +6,79 @@ import os
 import requests
 
 # --- 1. 설정 ---
-VERSION = "6.3-BYPASS"
+VERSION = "6.4-DIAG"
 DB_FILE = "trading_db.json"
-WATCH_STOCK = ["005930.KS", "NVDA"] # 삼성전자, 엔비디아
-WATCH_COIN = ["KRW-BTC", "KRW-ETH"] # 업비트 기준 비트코인, 이더리움
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding='utf-8') as f:
-                return json.load(f)
-        except: pass
-    return {"logs": [], "scan_count": 0, "last_ts": 0}
-
-def save_db(data):
-    try:
-        with open(DB_FILE, "w", encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except: pass
-
-# --- 2. 시세 수신 (멀티 채널 방식) ---
-def run_scan():
-    db = load_db()
-    now = get_now()
-    now_ts = now.timestamp()
-    
-    if now_ts - db.get("last_ts", 0) < 270:
-        return db
-
+# --- 2. 시세 수신 (가장 단순화) ---
+def get_data():
     results = []
     
-    # [방법 1] 코인 시세 (업비트 직접 호출 - 차단 확률 거의 없음)
-    for coin in WATCH_COIN:
-        try:
-            url = f"https://api.upbit.com/v1/ticker?markets={coin}"
-            res = requests.get(url, timeout=5).json()
-            price = res[0]['trade_price']
-            results.append(f"{coin.split('-')[1]}:{price:,.0f}")
-        except:
-            results.append(f"{coin}:ERR")
+    # 코인 테스트 (업비트)
+    try:
+        res = requests.get("https://api.upbit.com/v1/ticker?markets=KRW-BTC", timeout=5)
+        if res.status_code == 200:
+            price = res.json()[0]['trade_price']
+            results.append(f"BTC:{price:,.0f}")
+        else:
+            results.append(f"Upbit:HTTP-{res.status_code}")
+    except Exception as e:
+        results.append(f"Upbit:Err-{str(e)[:10]}")
 
-    # [방법 2] 주식 시세 (야후 파이낸스 - 차단 우회 시도)
-    for ticker in WATCH_STOCK:
+    # 주식 테스트 (야후)
+    try:
+        ticker = yf.Ticker("NVDA")
+        # 가장 기초적인 info 호출
+        price = ticker.fast_info['last_price']
+        if price:
+            results.append(f"NVDA:{price:,.1f}")
+        else:
+            results.append("NVDA:NoData")
+    except Exception as e:
+        results.append(f"NVDA:Err-{str(e)[:10]}")
+        
+    return " | ".join(results)
+
+# --- 3. 실행 로직 ---
+st.set_page_config(page_title="진단 모드", layout="centered")
+st.title(f"🔍 긴급 진단 v{VERSION}")
+
+# 버튼 누르면 즉시 시도
+if st.button("🚨 지금 당장 시세 가져오기 시도"):
+    with st.spinner("데이터 수신 중..."):
+        current_data = get_data()
+        st.success(f"결과: {current_data}") # 화면에 직접 출력
+        
+        # 로그 저장 시도
         try:
-            # Ticker 객체로 아주 가벼운 데이터만 요청
-            t = yf.Ticker(ticker)
-            p = t.fast_info['last_price']
-            if p:
-                results.append(f"{ticker.split('.')[0]}:{p:,.0f}")
+            if os.path.exists(DB_FILE):
+                with open(DB_FILE, "r", encoding='utf-8') as f:
+                    db = json.load(f)
             else:
-                results.append(f"{ticker}:N/A")
-        except:
-            results.append(f"{ticker}:BLOCK")
+                db = {"logs": []}
             
-    # 결과 저장
-    db["scan_count"] += 1
-    db["last_ts"] = now_ts
-    log_entry = f"[{now.strftime('%H:%M')}] {' | '.join(results)}"
-    db["logs"].append(log_entry)
-    if len(db["logs"]) > 30: db["logs"] = db["logs"][-30:]
-    save_db(db)
-    return db
-
-# --- 3. 실행 및 UI ---
-db = run_scan()
-
-st.set_page_config(page_title="모바일 트레이더", layout="centered")
-st.title(f"📱 모바일 관제소 v{VERSION}")
-
-# 상태 표시
-c1, c2 = st.columns(2)
-c1.metric("누적 스캔", f"{db['scan_count']}회")
-c2.write(f"최종 업데이트: {get_now().strftime('%H:%M:%S')}")
+            log_msg = f"[{get_now().strftime('%H:%M:%S')}] {current_data}"
+            db["logs"].append(log_msg)
+            if len(db["logs"]) > 20: db["logs"] = db["logs"][-20:]
+            
+            with open(DB_FILE, "w", encoding='utf-8') as f:
+                json.dump(db, f, indent=4, ensure_ascii=False)
+            st.write("✅ 로그 파일 저장 성공")
+        except Exception as e:
+            st.error(f"❌ 저장 실패: {e}")
 
 st.divider()
 
-# 로그 출력
-if not db["logs"]:
-    st.info("신호를 기다리는 중입니다 (5분 주기)")
+# 로그 표시
+if os.path.exists(DB_FILE):
+    try:
+        with open(DB_FILE, "r", encoding='utf-8') as f:
+            db = json.load(f)
+            for log in reversed(db.get("logs", [])):
+                st.text(log)
+    except:
+        st.write("로그 파일을 읽을 수 없습니다.")
 else:
-    for log in reversed(db["logs"]):
-        st.write(log)
-
-if st.button("🔄 즉시 새로고침"):
-    st.rerun()
+    st.write("저장된 로그 파일이 없습니다.")
