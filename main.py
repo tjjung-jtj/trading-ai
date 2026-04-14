@@ -5,73 +5,104 @@ import os
 import requests
 
 # --- 1. 설정 ---
-VERSION = "6.5-FIXED"
+VERSION = "6.6-FINAL"
 DB_FILE = "trading_db.json"
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
-# --- 2. 시세 수신 (야후 대신 직접 호출) ---
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding='utf-8') as f:
+                data = json.load(f)
+                # 잔고 설정이 없으면 초기화 (각 백만원)
+                if "balance_krw" not in data: data["balance_krw"] = 1000000
+                if "balance_usd" not in data: data["balance_usd"] = 1000000
+                if "balance_btc" not in data: data["balance_btc"] = 1000000
+                return data
+        except: pass
+    return {
+        "balance_krw": 1000000, 
+        "balance_usd": 1000000, 
+        "balance_btc": 1000000, 
+        "logs": [], 
+        "scan_count": 0, 
+        "last_ts": 0
+    }
+
+def save_db(data):
+    try:
+        with open(DB_FILE, "w", encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except: pass
+
+# --- 2. 시세 수신 (국장 포함 강화형) ---
 def get_data():
     results = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # [코인] 업비트 - 아주 잘 됨
+    # [코인] 업비트
     try:
         res = requests.get("https://api.upbit.com/v1/ticker?markets=KRW-BTC", timeout=5)
         price = res.json()[0]['trade_price']
         results.append(f"BTC:{price:,.0f}")
-    except:
-        results.append("BTC:Err")
+    except: results.append("BTC:Err")
 
-    # [주식] 야후 차단을 피해 다른 방식으로 수신 시도
-    # (엔비디아 시세를 가져오는 예비 경로)
+    # [미장] 엔비디아 (직접 쿼리)
     try:
-        # yfinance 대신 브라우저인 척 속여서 가져오기
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/NVDA?interval=1m&range=1d"
-        res = requests.get(url, headers=headers, timeout=5)
-        data = res.json()
-        price = data['chart']['result'][0]['meta']['regularMarketPrice']
-        results.append(f"NVDA:{price:,.1f}")
-    except:
-        results.append("NVDA:Wait") # 차단 시 대기 표시
+        url_nvda = "https://query1.finance.yahoo.com/v8/finance/chart/NVDA?interval=1m&range=1d"
+        res_nvda = requests.get(url_nvda, headers=headers, timeout=5).json()
+        price_nvda = res_nvda['chart']['result'][0]['meta']['regularMarketPrice']
+        results.append(f"NVDA:{price_nvda:,.1f}")
+    except: results.append("NVDA:Err")
+
+    # [국장] 삼성전자 (차단 우회용 전용 경로)
+    try:
+        url_samsung = "https://query1.finance.yahoo.com/v8/finance/chart/005930.KS?interval=1m&range=1d"
+        res_samsung = requests.get(url_samsung, headers=headers, timeout=5).json()
+        price_samsung = res_samsung['chart']['result'][0]['meta']['regularMarketPrice']
+        results.append(f"삼성:{price_samsung:,.0f}")
+    except: results.append("삼성:Wait")
         
     return " | ".join(results)
 
-# --- 3. 실행 로직 ---
-db = {"logs": []}
-if os.path.exists(DB_FILE):
-    try:
-        with open(DB_FILE, "r", encoding='utf-8') as f:
-            db = json.load(f)
-    except: pass
-
-# 5분마다 자동 기록 (크론잡 대응)
+# --- 3. 메인 실행 로직 ---
+db = load_db()
 now = get_now()
-last_ts = db.get("last_ts", 0)
-if now.timestamp() - last_ts >= 300:
+
+# 5분 자동 스캔 (크론잡 대응)
+if now.timestamp() - db.get("last_ts", 0) >= 300:
     current_data = get_data()
+    db["scan_count"] += 1
     db["last_ts"] = now.timestamp()
     db["logs"].append(f"[{now.strftime('%H:%M')}] {current_data}")
     if len(db["logs"]) > 30: db["logs"] = db["logs"][-30:]
-    
-    try:
-        with open(DB_FILE, "w", encoding='utf-8') as f:
-            json.dump(db, f, indent=4, ensure_ascii=False)
-    except: pass
+    save_db(db)
 
-# --- 4. UI ---
-st.set_page_config(page_title="모바일 관제소", layout="centered")
-st.title(f"📱 실시간 관제소 v{VERSION}")
+# --- 4. UI 구성 (모바일 최적화) ---
+st.set_page_config(page_title="AI Trading", layout="centered")
+st.title(f"📱 모바일 통합 관제소 v{VERSION}")
 
-# 현재가 한눈에 보기
-st.subheader("💡 현재 시세 확인")
-st.info(get_data()) 
+# 잔고 표시 섹션 (각 백만원)
+st.subheader("💰 내 자산 현황")
+c1, c2, c3 = st.columns(3)
+c1.metric("국장(KRW)", f"{db['balance_krw']//10000}만")
+c2.metric("미장(USD)", f"{db['balance_usd']//10000}만")
+c3.metric("코인(BTC)", f"{db['balance_btc']//10000}만")
 
 st.divider()
-st.subheader("📜 5분 주기 기록")
+
+# 실시간 시세 (새로고침 시 즉시 반영)
+st.subheader("📈 실시간 시세")
+st.success(get_data())
+
+st.divider()
+
+# 로그 표시
+st.subheader("📜 5분 주기 스캔 로그")
 for log in reversed(db.get("logs", [])):
     st.write(log)
 
-if st.button("🔄 새로고침"):
+if st.button("🔄 즉시 새로고침"):
     st.rerun()
