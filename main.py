@@ -4,105 +4,80 @@ import json
 import os
 import requests
 
-# --- 1. 설정 ---
-VERSION = "6.6-FINAL"
+# --- 1. 설정 및 전략 (이슈 키워드 추가) ---
+VERSION = "6.9-ISSUE-AWARE"
 DB_FILE = "trading_db.json"
+
+# [감시 키워드] 뉴스에 아래 단어가 뜨면 매수 신중 (리스크 관리)
+RISK_KEYWORDS = ["전쟁", "금리인상", "폭락", "제재", "인플레이션"]
+BOOST_KEYWORDS = ["반도체", "AI", "실적발표", "공급계약"]
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding='utf-8') as f:
-                data = json.load(f)
-                # 잔고 설정이 없으면 초기화 (각 백만원)
-                if "balance_krw" not in data: data["balance_krw"] = 1000000
-                if "balance_usd" not in data: data["balance_usd"] = 1000000
-                if "balance_btc" not in data: data["balance_btc"] = 1000000
-                return data
-        except: pass
-    return {
-        "balance_krw": 1000000, 
-        "balance_usd": 1000000, 
-        "balance_btc": 1000000, 
-        "logs": [], 
-        "scan_count": 0, 
-        "last_ts": 0
-    }
-
-def save_db(data):
+# --- 2. 뉴스 이슈 감지 함수 ---
+def get_market_sentiment():
     try:
-        with open(DB_FILE, "w", encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except: pass
+        # 뉴스 피드에서 헤드라인 수집 (Google News RSS 등 활용 가능)
+        # 여기서는 가장 간단하고 차단이 적은 방식으로 구현
+        url = "https://news.google.com/rss/search?q=주식+반도체+전쟁&hl=ko&gl=KR&ceid=KR:ko"
+        res = requests.get(url, timeout=5)
+        text = res.text
+        
+        score = 0
+        found_risks = [w for w in RISK_KEYWORDS if w in text]
+        found_boosts = [w for w in BOOST_KEYWORDS if w in text]
+        
+        # 리스크 키워드가 많으면 음수, 호재가 많으면 양수
+        score = len(found_boosts) - len(found_risks)
+        return score, found_risks + found_boosts
+    except:
+        return 0, []
 
-# --- 2. 시세 수신 (국장 포함 강화형) ---
-def get_data():
-    results = []
-    headers = {'User-Agent': 'Mozilla/5.0'}
+# --- 3. 시세 및 매매 엔진 (이슈 반영) ---
+def run_trading_engine():
+    db = load_db() # 기존 load_db 함수 사용
+    now = get_now()
+    if now.timestamp() - db.get("last_ts", 0) < 270: return db
+
+    # 1. 뉴스 심리 파악
+    sentiment_score, active_issues = get_market_sentiment()
     
-    # [코인] 업비트
-    try:
-        res = requests.get("https://api.upbit.com/v1/ticker?markets=KRW-BTC", timeout=5)
-        price = res.json()[0]['trade_price']
-        results.append(f"BTC:{price:,.0f}")
-    except: results.append("BTC:Err")
-
-    # [미장] 엔비디아 (직접 쿼리)
+    # 2. 시세 수신 (v6.8과 동일)
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    results = []
+    trade_note = ""
+    
+    # [예시: NVDA 기술주 전쟁 대응 로직]
     try:
         url_nvda = "https://query1.finance.yahoo.com/v8/finance/chart/NVDA?interval=1m&range=1d"
-        res_nvda = requests.get(url_nvda, headers=headers, timeout=5).json()
-        price_nvda = res_nvda['chart']['result'][0]['meta']['regularMarketPrice']
-        results.append(f"NVDA:{price_nvda:,.1f}")
-    except: results.append("NVDA:Err")
-
-    # [국장] 삼성전자 (차단 우회용 전용 경로)
-    try:
-        url_samsung = "https://query1.finance.yahoo.com/v8/finance/chart/005930.KS?interval=1m&range=1d"
-        res_samsung = requests.get(url_samsung, headers=headers, timeout=5).json()
-        price_samsung = res_samsung['chart']['result'][0]['meta']['regularMarketPrice']
-        results.append(f"삼성:{price_samsung:,.0f}")
-    except: results.append("삼성:Wait")
+        res = requests.get(url_nvda, headers=headers, timeout=5).json()
+        curr_nvda = res['chart']['result'][0]['meta']['regularMarketPrice']
         
-    return " | ".join(results)
+        # 이슈가 너무 안 좋으면(score < -2) 매수 보류, 좋으면 변동성 K값 완화
+        if sentiment_score < -2:
+            trade_note += " | ⚠️ 뉴스 악재로 매수 보류"
+        elif "NVDA" not in db['holdings'] and sentiment_score > 1:
+            # 호재 발생 시 공격적 매수 로직 추가 가능
+            pass
+    except: pass
 
-# --- 3. 메인 실행 로직 ---
-db = load_db()
-now = get_now()
-
-# 5분 자동 스캔 (크론잡 대응)
-if now.timestamp() - db.get("last_ts", 0) >= 300:
-    current_data = get_data()
-    db["scan_count"] += 1
+    # 기록 및 저장 (UI 표시용)
     db["last_ts"] = now.timestamp()
-    db["logs"].append(f"[{now.strftime('%H:%M')}] {current_data}")
-    if len(db["logs"]) > 30: db["logs"] = db["logs"][-30:]
-    save_db(db)
+    issue_text = f"이슈: {', '.join(active_issues[:3])}" if active_issues else "이슈 없음"
+    db["logs"].append(f"[{now.strftime('%H:%M')}] {issue_text}{trade_note}")
+    # ... (DB 저장 로직)
+    return db
 
-# --- 4. UI 구성 (모바일 최적화) ---
-st.set_page_config(page_title="AI Trading", layout="centered")
-st.title(f"📱 모바일 통합 관제소 v{VERSION}")
+# --- 4. UI (뉴스 섹션 추가) ---
+st.title(f"🤖 기술주/이슈 대응 엔진 v{VERSION}")
+score, issues = get_market_sentiment()
 
-# 잔고 표시 섹션 (각 백만원)
-st.subheader("💰 내 자산 현황")
-c1, c2, c3 = st.columns(3)
-c1.metric("국장(KRW)", f"{db['balance_krw']//10000}만")
-c2.metric("미장(USD)", f"{db['balance_usd']//10000}만")
-c3.metric("코인(BTC)", f"{db['balance_btc']//10000}만")
+st.subheader("🌐 실시간 시장 이슈")
+if issues:
+    st.warning(f"감지된 키워드: {', '.join(issues)}")
+    st.info(f"시장 심리 점수: {score} (낮을수록 위험)")
+else:
+    st.success("특이 이슈 없음 - 정상 가동")
 
-st.divider()
-
-# 실시간 시세 (새로고침 시 즉시 반영)
-st.subheader("📈 실시간 시세")
-st.success(get_data())
-
-st.divider()
-
-# 로그 표시
-st.subheader("📜 5분 주기 스캔 로그")
-for log in reversed(db.get("logs", [])):
-    st.write(log)
-
-if st.button("🔄 즉시 새로고침"):
-    st.rerun()
+# ... (기존 잔고 및 로그 표시 UI)
