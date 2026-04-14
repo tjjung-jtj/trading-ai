@@ -3,12 +3,13 @@ import yfinance as yf
 import datetime
 import json
 import os
+import requests
 
 # --- 1. 설정 ---
-VERSION = "6.2-FIX"
+VERSION = "6.3-BYPASS"
 DB_FILE = "trading_db.json"
-# 시세가 잘 나오던 핵심 종목
-WATCH_LIST = ["005930.KS", "NVDA", "BTC-USD", "ETH-USD"]
+WATCH_STOCK = ["005930.KS", "NVDA"] # 삼성전자, 엔비디아
+WATCH_COIN = ["KRW-BTC", "KRW-ETH"] # 업비트 기준 비트코인, 이더리움
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
@@ -27,58 +28,65 @@ def save_db(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except: pass
 
-# --- 2. 시세 수신 (가장 단순한 구조로 복구) ---
+# --- 2. 시세 수신 (멀티 채널 방식) ---
 def run_scan():
     db = load_db()
     now = get_now()
     now_ts = now.timestamp()
     
-    # 4분 30초 이내 중복 실행 방지
     if now_ts - db.get("last_ts", 0) < 270:
         return db
 
     results = []
-    for ticker in WATCH_LIST:
+    
+    # [방법 1] 코인 시세 (업비트 직접 호출 - 차단 확률 거의 없음)
+    for coin in WATCH_COIN:
         try:
-            # 시세가 잘 나오던 기본 download 방식
-            df = yf.download(ticker, period="1d", interval="1m", progress=False, timeout=10)
-            if not df.empty:
-                last_p = df['Close'].iloc[-1]
-                # 숫자 포맷팅 (정수형)
-                results.append(f"{ticker}:{last_p:,.0f}")
+            url = f"https://api.upbit.com/v1/ticker?markets={coin}"
+            res = requests.get(url, timeout=5).json()
+            price = res[0]['trade_price']
+            results.append(f"{coin.split('-')[1]}:{price:,.0f}")
+        except:
+            results.append(f"{coin}:ERR")
+
+    # [방법 2] 주식 시세 (야후 파이낸스 - 차단 우회 시도)
+    for ticker in WATCH_STOCK:
+        try:
+            # Ticker 객체로 아주 가벼운 데이터만 요청
+            t = yf.Ticker(ticker)
+            p = t.fast_info['last_price']
+            if p:
+                results.append(f"{ticker.split('.')[0]}:{p:,.0f}")
             else:
-                results.append(f"{ticker}:N/A") # 데이터가 비어있을 때
-        except Exception as e:
-            results.append(f"{ticker}:ERR") # 에러 발생 시
+                results.append(f"{ticker}:N/A")
+        except:
+            results.append(f"{ticker}:BLOCK")
             
-    # 결과가 있으면 로그 저장
-    if results:
-        db["scan_count"] += 1
-        db["last_ts"] = now_ts
-        log_entry = f"[{now.strftime('%H:%M')}] {' | '.join(results)}"
-        db["logs"].append(log_entry)
-        
-        if len(db["logs"]) > 30:
-            db["logs"] = db["logs"][-30:]
-        save_db(db)
+    # 결과 저장
+    db["scan_count"] += 1
+    db["last_ts"] = now_ts
+    log_entry = f"[{now.strftime('%H:%M')}] {' | '.join(results)}"
+    db["logs"].append(log_entry)
+    if len(db["logs"]) > 30: db["logs"] = db["logs"][-30:]
+    save_db(db)
     return db
 
 # --- 3. 실행 및 UI ---
 db = run_scan()
 
-st.set_page_config(page_title="AI 관제소", layout="centered")
+st.set_page_config(page_title="모바일 트레이더", layout="centered")
 st.title(f"📱 모바일 관제소 v{VERSION}")
 
-# 상태 요약
-col1, col2 = st.columns(2)
-col1.metric("누적 스캔", f"{db['scan_count']}회")
-col2.write(f"현재 시간: {get_now().strftime('%H:%M:%S')}")
+# 상태 표시
+c1, c2 = st.columns(2)
+c1.metric("누적 스캔", f"{db['scan_count']}회")
+c2.write(f"최종 업데이트: {get_now().strftime('%H:%M:%S')}")
 
 st.divider()
 
 # 로그 출력
 if not db["logs"]:
-    st.info("데이터를 기다리는 중입니다... 5분 뒤 다시 확인하세요.")
+    st.info("신호를 기다리는 중입니다 (5분 주기)")
 else:
     for log in reversed(db["logs"]):
         st.write(log)
