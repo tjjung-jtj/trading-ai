@@ -7,9 +7,10 @@ import time
 import threading
 
 # --- 0. 설정 ---
-VERSION = "4.0"
+VERSION = "4.2"
 DB_FILE = "trading_db.json"
-WATCH_LIST = ["BTC-USD", "ETH-USD", "NVDA", "TSLA", "005930.KS", "000660.KS"]
+# 테스트를 위해 가장 확실한 종목 3개만 먼저 시도
+WATCH_LIST = ["BTC-USD", "NVDA", "TSLA"]
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
@@ -28,7 +29,28 @@ def save_db(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except: pass
 
-# --- 1. 백그라운드 엔진 (핵심) ---
+# --- 1. 시세 수신 함수 (진단 모드) ---
+def get_prices():
+    results = []
+    for t in WATCH_LIST:
+        try:
+            # fast_info를 사용하여 아주 가벼운 데이터만 요청
+            ticker = yf.Ticker(t)
+            price = ticker.fast_info['last_price']
+            if price:
+                results.append(f"{t}:{price:,.2f}")
+            else:
+                results.append(f"{t}:값없음")
+        except Exception as e:
+            # 에러가 나면 에러 메시지 앞부분을 로그에 찍음
+            error_msg = str(e)[:10]
+            results.append(f"{t}:실패({error_msg})")
+        time.sleep(0.5)
+    
+    final_text = " | ".join(results)
+    return final_text if final_text else "데이터 수신 시도 안됨"
+
+# --- 2. 백그라운드 엔진 ---
 def background_scanner():
     while True:
         db = load_db()
@@ -36,49 +58,36 @@ def background_scanner():
         now_ts = now.timestamp()
         last_ts = db.get("last_scan_timestamp", 0)
 
-        # 5분(300초) 주기 체크
         if (now_ts - last_ts >= 300):
             db["scan_count"] += 1
             db["last_scan"] = now.strftime('%Y-%m-%d %H:%M:%S')
             db["last_scan_timestamp"] = now_ts
             
-            try:
-                data = yf.download(" ".join(WATCH_LIST), period="1d", interval="1m", progress=False, timeout=10, threads=False)
-                if not data.empty:
-                    prices = []
-                    for t in WATCH_LIST:
-                        try:
-                            val = (data['Close'][t] if len(WATCH_LIST) > 1 else data['Close']).dropna().iloc[-1]
-                            prices.append(f"{t}:{val:,.0f}")
-                        except: prices.append(f"{t}:?")
-                    db['logs'].append(f"[{now.strftime('%H:%M')}] 🚀 자동스캔: {' | '.join(prices)}")
-                else:
-                    db['logs'].append(f"[{now.strftime('%H:%M')}] ⚠️ 데이터 대기")
-            except:
-                db['logs'].append(f"[{now.strftime('%H:%M')}] ❌ 스캔 지연")
+            # 시세 가져오기
+            price_output = get_prices()
+            db['logs'].append(f"[{now.strftime('%H:%M')}] {price_output}")
 
             if len(db['logs']) > 30: db['logs'] = db['logs'][-30:]
             save_db(db)
-            print(f"Scan Completed: {db['last_scan']}") # Render 로그에서 확인 가능
             
-        time.sleep(60) # 1분마다 주기 체크
+        time.sleep(30)
 
-# 서버 시작 시 백그라운드 스레드 딱 하나만 실행
 if "scanner_started" not in st.session_state:
     thread = threading.Thread(target=background_scanner, daemon=True)
     thread.start()
     st.session_state["scanner_started"] = True
 
-# --- 2. UI 구성 ---
+# --- 3. UI ---
 st.set_page_config(page_title=f"AI Trading v{VERSION}", layout="wide")
-db = load_db() # 최신 데이터 로드
+db = load_db()
+st.title(f"🚀 시세 진단 엔진 (v{VERSION})")
+st.write(f"마지막 스캔: {db.get('last_scan')}")
 
-st.title("🔥 AI 무한 동력 시스템")
-st.info(f"이 엔진은 서버가 살아있는 동안 **백그라운드에서 5분마다** 스스로 작동합니다.")
-
-st.success(f"**현재 버전: v{VERSION}** | 누적 스캔: **{db.get('scan_count', 0)}회**")
-
-# (이하 UI 및 로그 출력 부분은 동일...)
-st.subheader("📜 실시간 시스템 로그")
-for log in list(reversed(db.get('logs', [])))[:15]:
-    st.write(log)
+st.divider()
+st.subheader("📜 시스템 로그 (시세 확인용)")
+logs = db.get('logs', [])
+if not logs:
+    st.write("아직 로그가 없습니다. 잠시만 기다려주세요.")
+else:
+    for log in list(reversed(logs))[:20]:
+        st.write(log)
