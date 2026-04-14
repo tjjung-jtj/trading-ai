@@ -3,9 +3,11 @@ import yfinance as yf
 import datetime
 import json
 import os
+import time
+import threading
 
 # --- 0. 설정 ---
-VERSION = "2.9"
+VERSION = "4.0"
 DB_FILE = "trading_db.json"
 WATCH_LIST = ["BTC-USD", "ETH-USD", "NVDA", "TSLA", "005930.KS", "000660.KS"]
 
@@ -26,66 +28,57 @@ def save_db(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except: pass
 
-# --- 1. 엔진 가동 (가장 먼저 실행) ---
-db = load_db()
-now = get_now()
-now_ts = now.timestamp()
-last_ts = db.get("last_scan_timestamp", 0)
+# --- 1. 백그라운드 엔진 (핵심) ---
+def background_scanner():
+    while True:
+        db = load_db()
+        now = get_now()
+        now_ts = now.timestamp()
+        last_ts = db.get("last_scan_timestamp", 0)
 
-# [수정] 5분이 지났다면 "즉시" 저장부터 실행
-if (now_ts - last_ts > 290):
-    db["scan_count"] += 1
-    db["last_scan"] = now.strftime('%Y-%m-%d %H:%M:%S')
-    db["last_scan_timestamp"] = now_ts
-    # 시세 조회 전에 일단 숫자부터 저장 (서버 뻗기 방지)
-    save_db(db)
-    
-    # 그 다음 시세 조회 시도
-    try:
-        data = yf.download(" ".join(WATCH_LIST), period="1d", interval="1m", progress=False, timeout=10, threads=False)
-        if not data.empty:
-            price_summaries = []
-            for ticker in WATCH_LIST:
-                try:
-                    ticker_df = data['Close'][ticker] if len(WATCH_LIST) > 1 else data['Close']
-                    valid_series = ticker_df.dropna()
-                    price = f"{valid_series.iloc[-1]:,.0f}" if not valid_series.empty else "휴장"
-                    price_summaries.append(f"{ticker}:{price}")
-                except: price_summaries.append(f"{ticker}:?")
-            db['logs'].append(f"[{now.strftime('%H:%M')}] ✅ { ' | '.join(price_summaries) }")
-        else:
-            db['logs'].append(f"[{now.strftime('%H:%M')}] ⚠️ 데이터 수신 지연")
-    except Exception as e:
-        db['logs'].append(f"[{now.strftime('%H:%M')}] ❌ 엔진지연")
-    
-    save_db(db)
+        # 5분(300초) 주기 체크
+        if (now_ts - last_ts >= 300):
+            db["scan_count"] += 1
+            db["last_scan"] = now.strftime('%Y-%m-%d %H:%M:%S')
+            db["last_scan_timestamp"] = now_ts
+            
+            try:
+                data = yf.download(" ".join(WATCH_LIST), period="1d", interval="1m", progress=False, timeout=10, threads=False)
+                if not data.empty:
+                    prices = []
+                    for t in WATCH_LIST:
+                        try:
+                            val = (data['Close'][t] if len(WATCH_LIST) > 1 else data['Close']).dropna().iloc[-1]
+                            prices.append(f"{t}:{val:,.0f}")
+                        except: prices.append(f"{t}:?")
+                    db['logs'].append(f"[{now.strftime('%H:%M')}] 🚀 자동스캔: {' | '.join(prices)}")
+                else:
+                    db['logs'].append(f"[{now.strftime('%H:%M')}] ⚠️ 데이터 대기")
+            except:
+                db['logs'].append(f"[{now.strftime('%H:%M')}] ❌ 스캔 지연")
 
-# [수정] 로봇 모드 확인 (더 넓은 범위 허용)
-is_robot = False
-params = st.query_params.to_dict()
-if params.get("auto") == "true" or params.get("type") == "robot":
-    is_robot = True
+            if len(db['logs']) > 30: db['logs'] = db['logs'][-30:]
+            save_db(db)
+            print(f"Scan Completed: {db['last_scan']}") # Render 로그에서 확인 가능
+            
+        time.sleep(60) # 1분마다 주기 체크
 
-if is_robot:
-    st.write("OK")
-    st.stop()
+# 서버 시작 시 백그라운드 스레드 딱 하나만 실행
+if "scanner_started" not in st.session_state:
+    thread = threading.Thread(target=background_scanner, daemon=True)
+    thread.start()
+    st.session_state["scanner_started"] = True
 
 # --- 2. UI 구성 ---
 st.set_page_config(page_title=f"AI Trading v{VERSION}", layout="wide")
-st.title("📊 AI 자동 매매 시스템")
-st.success(f"**엔진 가동 중 (v{VERSION})** | 누적 스캔: **{db.get('scan_count', 0)}회**")
+db = load_db() # 최신 데이터 로드
 
-c1, c2, c3 = st.columns(3)
-c1.metric("🇰🇷 국장", f"{db.get('balance_kr', 0):,.0f}원")
-c2.metric("🇺🇸 미장", f"{db.get('balance_us', 0):,.0f}$")
-c3.metric("🪙 코인", f"{db.get('balance_coin', 0):,.0f}원")
+st.title("🔥 AI 무한 동력 시스템")
+st.info(f"이 엔진은 서버가 살아있는 동안 **백그라운드에서 5분마다** 스스로 작동합니다.")
 
-st.divider()
-if st.button("🚀 즉시 강제 스캔", use_container_width=True):
-    db["last_scan_timestamp"] = 0
-    save_db(db)
-    st.rerun()
+st.success(f"**현재 버전: v{VERSION}** | 누적 스캔: **{db.get('scan_count', 0)}회**")
 
-st.subheader("📜 시스템 로그")
+# (이하 UI 및 로그 출력 부분은 동일...)
+st.subheader("📜 실시간 시스템 로그")
 for log in list(reversed(db.get('logs', [])))[:15]:
     st.write(log)
