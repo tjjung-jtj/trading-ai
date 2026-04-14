@@ -3,25 +3,23 @@ import yfinance as yf
 import datetime
 import json
 import os
-import time
-import threading
 
-# --- 0. 설정 ---
-VERSION = "4.2"
+# --- 1. 설정 ---
+VERSION = "6.2-FIX"
 DB_FILE = "trading_db.json"
-# 테스트를 위해 가장 확실한 종목 3개만 먼저 시도
-WATCH_LIST = ["BTC-USD", "NVDA", "TSLA"]
+# 시세가 잘 나오던 핵심 종목
+WATCH_LIST = ["005930.KS", "NVDA", "BTC-USD", "ETH-USD"]
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
 
 def load_db():
-    try:
-        if os.path.exists(DB_FILE):
+    if os.path.exists(DB_FILE):
+        try:
             with open(DB_FILE, "r", encoding='utf-8') as f:
                 return json.load(f)
-    except: pass
-    return {"balance_kr": 1000000, "balance_us": 1000, "balance_coin": 1000000, "logs": [], "scan_count": 0, "last_scan": "없음", "last_scan_timestamp": 0}
+        except: pass
+    return {"logs": [], "scan_count": 0, "last_ts": 0}
 
 def save_db(data):
     try:
@@ -29,65 +27,61 @@ def save_db(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except: pass
 
-# --- 1. 시세 수신 함수 (진단 모드) ---
-def get_prices():
-    results = []
-    for t in WATCH_LIST:
-        try:
-            # fast_info를 사용하여 아주 가벼운 데이터만 요청
-            ticker = yf.Ticker(t)
-            price = ticker.fast_info['last_price']
-            if price:
-                results.append(f"{t}:{price:,.2f}")
-            else:
-                results.append(f"{t}:값없음")
-        except Exception as e:
-            # 에러가 나면 에러 메시지 앞부분을 로그에 찍음
-            error_msg = str(e)[:10]
-            results.append(f"{t}:실패({error_msg})")
-        time.sleep(0.5)
+# --- 2. 시세 수신 (가장 단순한 구조로 복구) ---
+def run_scan():
+    db = load_db()
+    now = get_now()
+    now_ts = now.timestamp()
     
-    final_text = " | ".join(results)
-    return final_text if final_text else "데이터 수신 시도 안됨"
+    # 4분 30초 이내 중복 실행 방지
+    if now_ts - db.get("last_ts", 0) < 270:
+        return db
 
-# --- 2. 백그라운드 엔진 ---
-def background_scanner():
-    while True:
-        db = load_db()
-        now = get_now()
-        now_ts = now.timestamp()
-        last_ts = db.get("last_scan_timestamp", 0)
-
-        if (now_ts - last_ts >= 300):
-            db["scan_count"] += 1
-            db["last_scan"] = now.strftime('%Y-%m-%d %H:%M:%S')
-            db["last_scan_timestamp"] = now_ts
+    results = []
+    for ticker in WATCH_LIST:
+        try:
+            # 시세가 잘 나오던 기본 download 방식
+            df = yf.download(ticker, period="1d", interval="1m", progress=False, timeout=10)
+            if not df.empty:
+                last_p = df['Close'].iloc[-1]
+                # 숫자 포맷팅 (정수형)
+                results.append(f"{ticker}:{last_p:,.0f}")
+            else:
+                results.append(f"{ticker}:N/A") # 데이터가 비어있을 때
+        except Exception as e:
+            results.append(f"{ticker}:ERR") # 에러 발생 시
             
-            # 시세 가져오기
-            price_output = get_prices()
-            db['logs'].append(f"[{now.strftime('%H:%M')}] {price_output}")
+    # 결과가 있으면 로그 저장
+    if results:
+        db["scan_count"] += 1
+        db["last_ts"] = now_ts
+        log_entry = f"[{now.strftime('%H:%M')}] {' | '.join(results)}"
+        db["logs"].append(log_entry)
+        
+        if len(db["logs"]) > 30:
+            db["logs"] = db["logs"][-30:]
+        save_db(db)
+    return db
 
-            if len(db['logs']) > 30: db['logs'] = db['logs'][-30:]
-            save_db(db)
-            
-        time.sleep(30)
+# --- 3. 실행 및 UI ---
+db = run_scan()
 
-if "scanner_started" not in st.session_state:
-    thread = threading.Thread(target=background_scanner, daemon=True)
-    thread.start()
-    st.session_state["scanner_started"] = True
+st.set_page_config(page_title="AI 관제소", layout="centered")
+st.title(f"📱 모바일 관제소 v{VERSION}")
 
-# --- 3. UI ---
-st.set_page_config(page_title=f"AI Trading v{VERSION}", layout="wide")
-db = load_db()
-st.title(f"🚀 시세 진단 엔진 (v{VERSION})")
-st.write(f"마지막 스캔: {db.get('last_scan')}")
+# 상태 요약
+col1, col2 = st.columns(2)
+col1.metric("누적 스캔", f"{db['scan_count']}회")
+col2.write(f"현재 시간: {get_now().strftime('%H:%M:%S')}")
 
 st.divider()
-st.subheader("📜 시스템 로그 (시세 확인용)")
-logs = db.get('logs', [])
-if not logs:
-    st.write("아직 로그가 없습니다. 잠시만 기다려주세요.")
+
+# 로그 출력
+if not db["logs"]:
+    st.info("데이터를 기다리는 중입니다... 5분 뒤 다시 확인하세요.")
 else:
-    for log in list(reversed(logs))[:20]:
+    for log in reversed(db["logs"]):
         st.write(log)
+
+if st.button("🔄 즉시 새로고침"):
+    st.rerun()
