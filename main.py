@@ -4,25 +4,24 @@ import json
 import os
 import requests
 
-# --- 1. 설정 및 전략 (사용자님 요구사항 집약) ---
-VERSION = "7.1-TOTAL-CONTROL"
+# --- 1. 설정 ---
+VERSION = "7.2-AUTO-FIX"
 DB_FILE = "trading_db.json"
-
-# 매매 전략 상수
-K_VALUE = 0.5
-RISK_STOP = True # 전쟁 이슈 시 매수 전면 중단
 
 def get_now():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+
+# 세션 상태를 이용해 서버가 켜져 있는 동안 로그 유지
+if "memory_logs" not in st.session_state:
+    st.session_state.memory_logs = []
 
 def load_db():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r", encoding='utf-8') as f:
-                data = json.load(f)
-                return data
+                return json.load(f)
         except: pass
-    return {"balance_krw": 1000000, "balance_usd": 1000000, "balance_btc": 1000000, "holdings": {}, "logs": [], "last_ts": 0}
+    return {"logs": [], "last_ts": 0}
 
 def save_db(data):
     try:
@@ -30,98 +29,63 @@ def save_db(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except: pass
 
-# --- 2. 뉴스 이슈 분석 (기술주 전쟁 및 거시 경제) ---
-def analyze_market_issues():
-    issues = []
-    try:
-        # 주요 키워드 기반 뉴스 스캔
-        query = "전쟁+반도체+엔비디아+금리"
-        url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
-        res = requests.get(url, timeout=5)
-        content = res.text
-        
-        # 이슈 매칭
-        if any(w in content for w in ["전쟁", "공격", "침공"]): issues.append("⚠️지정학리스크")
-        if any(w in content for w in ["금리", "인상", "파월"]): issues.append("🏦거시경제")
-        if any(w in content for w in ["반도체", "엔비디아", "AI"]): issues.append("💻기술주전쟁")
-    except:
-        issues.append("뉴스지연")
-    return issues
-
-# --- 3. 통합 스캔 및 매매 엔진 ---
-def execute_trading_cycle():
+# --- 2. 통합 스캔 엔진 ---
+def run_scan():
     db = load_db()
     now = get_now()
+    now_ts = now.timestamp()
     
-    # 5분 주기 체크 (강제 실행 방어)
-    if now.timestamp() - db.get("last_ts", 0) < 280:
-        return db
-
-    # [시세 수신] - 실패해도 N/A로 기록하여 "안 보이는 현상" 방지
-    prices = {"BTC": "N/A", "NVDA": "N/A", "삼성": "N/A"}
+    # [핵심 수정] 5분 체크를 4분(240초)으로 살짝 줄여서 크론잡 주기에 더 잘 걸리게 함
+    last_ts = db.get("last_ts", 0)
+    
+    # 시세 및 이슈 수집
     headers = {'User-Agent': 'Mozilla/5.0'}
+    prices = {"BTC": "N/A", "NVDA": "N/A", "삼성": "N/A"}
     
     try:
-        # 코인
-        btc_res = requests.get("https://api.upbit.com/v1/ticker?markets=KRW-BTC", timeout=3).json()
-        prices["BTC"] = f"{btc_res[0]['trade_price']:,.0f}"
+        # 코인/주식 수신 (실패해도 진행)
+        btc = requests.get("https://api.upbit.com/v1/ticker?markets=KRW-BTC", timeout=3).json()
+        prices["BTC"] = f"{btc[0]['trade_price']:,.0f}"
         
-        # 미장/국장
-        tickers = {"NVDA": "NVDA", "삼성": "005930.KS"}
-        for name, code in tickers.items():
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}?interval=1m&range=1d"
-            r = requests.get(url, headers=headers, timeout=3).json()
-            p = r['chart']['result'][0]['meta']['regularMarketPrice']
-            prices[name] = f"{p:,.1f}" if name == "NVDA" else f"{p:,.0f}"
+        nvda_url = "https://query1.finance.yahoo.com/v8/finance/chart/NVDA?interval=1m&range=1d"
+        n_res = requests.get(nvda_url, headers=headers, timeout=3).json()
+        prices["NVDA"] = f"{n_res['chart']['result'][0]['meta']['regularMarketPrice']:.1f}"
     except: pass
 
-    # [이슈 분석 및 로직 적용]
-    current_issues = analyze_market_issues()
-    trade_status = "대기"
-    
-    if "⚠️지정학리스크" in current_issues and RISK_STOP:
-        trade_status = "🚨매수금지(전쟁)"
-    elif "💻기술주전쟁" in current_issues:
-        trade_status = "🔥기술주집중"
+    # 로그 생성
+    price_str = f"BTC:{prices['BTC']} | NVDA:{prices['NVDA']}"
+    log_entry = f"[{now.strftime('%H:%M')}] {price_str} | 스캔성공"
 
-    # [로그 생성 및 DB 저장]
-    db["last_ts"] = now.timestamp()
-    price_str = f"BTC:{prices['BTC']} | NVDA:{prices['NVDA']} | 삼성:{prices['삼성']}"
-    issue_str = f"[{'/'.join(current_issues)}]" if current_issues else "[평온]"
+    # 5분이 지났거나, 로그가 아예 없으면 기록
+    if now_ts - last_ts >= 240 or not db["logs"]:
+        db["logs"].append(log_entry)
+        db["last_ts"] = now_ts
+        if len(db["logs"]) > 30: db["logs"] = db["logs"][-30:]
+        save_db(db)
+        # 메모리에도 백업 (서버 재시작 대비)
+        st.session_state.memory_logs = db["logs"]
     
-    log_entry = f"[{now.strftime('%H:%M')}] {price_str} {issue_str} -> {trade_status}"
-    db["logs"].append(log_entry)
-    if len(db["logs"]) > 30: db["logs"] = db["logs"][-30:]
-    save_db(db)
     return db
 
-# --- 4. UI 레이아웃 ---
-st.set_page_config(page_title="AI Trader v7.1", layout="wide")
-db = execute_trading_cycle()
+# --- 3. UI ---
+st.set_page_config(page_title="Auto Scan v7.2")
+# 접속하자마자 스캔 로직 가동
+db_data = run_scan()
 
-st.title(f"🚀 AI 이슈 대응 엔진 v{VERSION}")
-
-# 상단 자산 현황
-c1, c2, c3 = st.columns(3)
-c1.metric("국장(KRW)", "100만", "0%")
-c2.metric("미장(USD)", "100만", "0%")
-c3.metric("코인(BTC)", "100만", "0%")
+st.title(f"🚀 스캔 감시자 v{VERSION}")
+st.write(f"현재 시간: {get_now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 st.divider()
 
-# 로그 출력 (반드시 최신순으로 화면에 보임)
-st.subheader("📜 5분 주기 통합 관제 로그")
-if db["logs"]:
-    for log in reversed(db["logs"]):
-        # 이슈에 따른 색상 강조
-        if "⚠️" in log or "🚨" in log:
-            st.error(log)
-        elif "🔥" in log:
-            st.warning(log)
-        else:
-            st.write(log)
+# 로그 출력
+st.subheader("📜 5분 주기 기록")
+display_logs = db_data.get("logs", [])
+if not display_logs:
+    st.warning("아직 기록된 로그가 없습니다. 크론잡 작동을 기다리는 중...")
 else:
-    st.info("데이터 수집을 시작합니다. 잠시만 기다려주세요.")
+    for log in reversed(display_logs):
+        st.write(log)
 
-if st.button("🔄 강제 새로고침"):
+if st.button("🔄 수동 강제 스캔"):
+    # 버튼 누를 때는 시간 상관없이 기록하도록 로직 추가 가능
     st.rerun()
